@@ -12,12 +12,12 @@ API_URL = "https://api.telegram.org/bot" + TG_TOKEN
 
 ALERT_THRESHOLD = 80
 SCAN_INTERVAL = 300
+MIN_ALERT_DELAY = 1800
 
 subscribers = set()
+last_alert_time = {}
 last_alert_sig = {}
 
-
-# ── TELEGRAM ──────────────────────────────────────────────────────
 
 def send(chat_id, text):
     try:
@@ -39,8 +39,6 @@ def typing(chat_id):
     except:
         pass
 
-
-# ── TWELVE DATA ───────────────────────────────────────────────────
 
 def get_quote():
     r = requests.get(
@@ -91,8 +89,6 @@ def get_dxy():
     return None
 
 
-# ── CALENDRIER ECONOMIQUE ─────────────────────────────────────────
-
 def get_economic_events():
     try:
         today = datetime.now().strftime("%Y-%m-%d")
@@ -126,8 +122,6 @@ def get_economic_events():
         print("Calendar error: " + str(e))
         return []
 
-
-# ── MATH ──────────────────────────────────────────────────────────
 
 def last_n(a, n):
     return a[-min(len(a), n):]
@@ -232,8 +226,6 @@ def calc_supres(cl):
     }
 
 
-# ── INDICATEURS PAR TIMEFRAME ─────────────────────────────────────
-
 def compute_indicators(closes, highs, lows):
     price = closes[-1]
     return {
@@ -253,8 +245,6 @@ def compute_indicators(closes, highs, lows):
         "res": calc_supres(closes),
     }
 
-
-# ── SIGNAL ENGINE ─────────────────────────────────────────────────
 
 def build_signal(price, ind):
     S = []
@@ -396,8 +386,6 @@ def build_signal(price, ind):
     }
 
 
-# ── MULTI TIMEFRAME ───────────────────────────────────────────────
-
 def multi_timeframe_analysis():
     results = {}
     timeframes = [("1h", "H1"), ("4h", "H4"), ("1day", "D1")]
@@ -421,15 +409,11 @@ def mtf_confluence(mtf):
     sells = signals.count("SELL")
     total = len(signals)
     if buys > sells:
-        conf = round((buys / total) * 100)
-        return "BUY", conf
+        return "BUY", round((buys / total) * 100)
     elif sells > buys:
-        conf = round((sells / total) * 100)
-        return "SELL", conf
+        return "SELL", round((sells / total) * 100)
     return "NEUTRE", 50
 
-
-# ── ANALYSE COMPLETE ──────────────────────────────────────────────
 
 def run_full_analysis():
     quote = get_quote()
@@ -439,23 +423,24 @@ def run_full_analysis():
     ind = h1.get("ind") or {}
     result = h1.get("result") or {}
     confluence_sig, confluence_conf = mtf_confluence(mtf)
-
     if result and result["sig"] == confluence_sig:
         result["conf"] = min(99, round((result["conf"] + confluence_conf) / 2 + 5))
-
     events = get_economic_events()
     dxy = get_dxy()
-
     return price, quote, result, ind, mtf, events, dxy
 
 
-# ── CLAUDE AI ─────────────────────────────────────────────────────
+# ── CLAUDE AI COMME VRAI VALIDATEUR ──────────────────────────────
+# Claude recoit TOUS les indicateurs et rend un verdict OUI/NON
+# avec une explication. C est lui qui decide si l alerte est envoyee.
 
-def get_ai_analysis(price, result, ind, quote, mtf, events, dxy):
+def claude_validate_signal(price, result, ind, quote, mtf, events, dxy):
     if not ANTHROPIC_KEY:
-        return "Cle Anthropic manquante."
+        return True, "Cle Anthropic manquante - signal envoye sans validation AI."
 
     today = datetime.now().strftime("%d/%m/%Y %H:%M")
+    sig = result.get("sig", "NEUTRE")
+    conf = result.get("conf", 0)
 
     h1_sig = mtf.get("H1", {}).get("signal", "N/A")
     h4_sig = mtf.get("H4", {}).get("signal", "N/A")
@@ -469,33 +454,53 @@ def get_ai_analysis(price, result, ind, quote, mtf, events, dxy):
         for ev in events:
             events_str += ev.get("name", "") + " (" + ev.get("time", "") + ") | "
     else:
-        events_str = "Aucun evenement majeur identifie"
+        events_str = "Aucun evenement majeur"
 
     dxy_str = str(round(dxy, 2)) if dxy else "indisponible"
 
     prompt = (
-        "Tu es un expert trader XAU/USD et analyste macro. Nous sommes le " + today + ".\n\n"
+        "Tu es un expert trader XAU/USD avec 15 ans d experience. Nous sommes le " + today + ".\n\n"
+        "Le systeme technique a genere un signal " + sig + " avec " + str(conf) + "% de fiabilite.\n\n"
         "ANALYSE MULTI-TIMEFRAME:\n"
         "H1: " + h1_sig + " (" + str(h1_conf) + "%)\n"
         "H4: " + h4_sig + " (" + str(h4_conf) + "%)\n"
         "D1: " + d1_sig + " (" + str(d1_conf) + "%)\n\n"
-        "DONNEES H1 EN TEMPS REEL:\n"
+        "DONNEES TECHNIQUES H1:\n"
         "Prix: " + str(round(price, 2)) + " USD/oz\n"
         "Variation: " + str(round(quote["change"], 2)) + " (" + str(round(quote["pct"], 2)) + "%)\n"
-        "Signal consolide: " + result.get("sig", "N/A") + " avec " + str(result.get("conf", 0)) + "% de fiabilite\n"
-        "Entree: " + str(result.get("entry", "N/A")) + "\n"
+        "Entree proposee: " + str(result.get("entry", "N/A")) + "\n"
         "TP: " + str(result.get("tp", "N/A")) + " | SL: " + str(result.get("sl", "N/A")) + " | RR: 1:" + str(result.get("rr", "N/A")) + "\n"
-        "RSI: " + str(ind.get("rsi", "N/A")) + " | MACD hist: " + str(ind.get("macd", {}).get("hist", "N/A")) + "\n"
-        "ADX: " + str(ind.get("adx", {}).get("adx", "N/A")) + "\n"
+        "RSI: " + str(ind.get("rsi", "N/A")) + "\n"
+        "MACD histogramme: " + str(ind.get("macd", {}).get("hist", "N/A")) + "\n"
+        "EMA 20/50/200: " + str(ind.get("e20", "N/A")) + "/" + str(ind.get("e50", "N/A")) + "/" + str(ind.get("e200", "N/A")) + "\n"
+        "ADX: " + str(ind.get("adx", {}).get("adx", "N/A")) + " DI+: " + str(ind.get("adx", {}).get("diP", "N/A")) + " DI-: " + str(ind.get("adx", {}).get("diN", "N/A")) + "\n"
+        "Stoch: " + str(ind.get("stoch", {}).get("k", "N/A")) + "/" + str(ind.get("stoch", {}).get("d", "N/A")) + "\n"
+        "CCI: " + str(ind.get("cci", "N/A")) + " | Williams: " + str(ind.get("wr", "N/A")) + "\n"
+        "BB: " + str(ind.get("bb", {}).get("lower", "N/A")) + " / " + str(ind.get("bb", {}).get("upper", "N/A")) + "\n"
+        "ATR: " + str(ind.get("atr", "N/A")) + " | SAR: " + str(ind.get("psar", "N/A")) + "\n"
+        "Support: " + str(ind.get("res", {}).get("sup", "N/A")) + " | Resistance: " + str(ind.get("res", {}).get("res", "N/A")) + "\n"
+        "Score Bull: " + str(result.get("bW", 0)) + " pts | Score Bear: " + str(result.get("rW", 0)) + " pts\n"
         "DXY Dollar Index: " + dxy_str + "\n\n"
-        "EVENEMENTS ECONOMIQUES AUJOURD HUI ET DEMAIN:\n"
+        "EVENEMENTS ECONOMIQUES:\n"
         "" + events_str + "\n\n"
-        "Redige une analyse complete en 4 sections:\n\n"
-        "1. MULTI-TIMEFRAME: Les 3 timeframes sont-ils alignes ? Que dit chacun ?\n"
-        "2. CONTEXTE MACRO: Dollar (DXY " + dxy_str + "), Fed, inflation, geopolitique - impact sur l or\n"
-        "3. NEWS A SURVEILLER: Commente les evenements economiques du calendrier ci-dessus\n"
-        "4. CONSEIL FINAL: Valides-tu ce trade ? Entree precise, SL, TP, niveau de risque\n\n"
-        "Sois direct et concis. En francais simple pour un trader debutant."
+        "TON ROLE: Tu dois valider ou invalider ce signal " + sig + ".\n\n"
+        "Reponds EXACTEMENT dans ce format:\n\n"
+        "VALIDATION: OUI ou NON\n"
+        "RAISON: (1-2 phrases expliquant pourquoi tu valides ou invalides)\n"
+        "ANALYSE: (3-4 phrases pour le trader sur le contexte marche, les indicateurs cles, et le conseil)\n\n"
+        "Criteres pour dire OUI:\n"
+        "- Au moins 2 des 3 timeframes alignes dans la meme direction\n"
+        "- RSI coherent avec le signal (pas de divergence majeure)\n"
+        "- ADX > 20 (marche avec tendance)\n"
+        "- Pas de news majeure dans les 2 prochaines heures pouvant tout inverser\n"
+        "- Ratio R/R >= 1.5\n\n"
+        "Criteres pour dire NON:\n"
+        "- Timeframes en contradiction\n"
+        "- RSI en divergence avec le signal\n"
+        "- ADX < 15 (marche sans direction)\n"
+        "- News majeure imminente (Fed, CPI, NFP dans moins de 2h)\n"
+        "- Ratio R/R < 1.5\n\n"
+        "Sois strict et honnete. En francais."
     )
 
     r = requests.post(
@@ -507,16 +512,173 @@ def get_ai_analysis(price, result, ind, quote, mtf, events, dxy):
         },
         json={
             "model": "claude-sonnet-4-20250514",
-            "max_tokens": 1200,
+            "max_tokens": 600,
             "messages": [{"role": "user", "content": prompt}]
         },
         timeout=30
     )
     d = r.json()
-    return "".join(b.get("text", "") for b in d.get("content", []))
+    response = "".join(b.get("text", "") for b in d.get("content", []))
+
+    validated = "VALIDATION: OUI" in response.upper()
+
+    raison = ""
+    analyse = ""
+    lines = response.split("\n")
+    capture_analyse = False
+    for line in lines:
+        if line.upper().startswith("RAISON:"):
+            raison = line[7:].strip()
+        elif line.upper().startswith("ANALYSE:"):
+            analyse = line[8:].strip()
+            capture_analyse = True
+        elif capture_analyse and line.strip():
+            analyse += " " + line.strip()
+
+    full_text = ""
+    if raison:
+        full_text += raison + "\n\n"
+    if analyse:
+        full_text += analyse
+
+    return validated, full_text.strip() or response
 
 
-# ── RAPPORT QUOTIDIEN ─────────────────────────────────────────────
+def format_mtf_line(mtf):
+    lines = ""
+    for tf in ["H1", "H4", "D1"]:
+        sig = mtf.get(tf, {}).get("signal", "N/A")
+        conf = mtf.get(tf, {}).get("conf", 0)
+        lines += tf + ": `" + sig + "` (" + str(conf) + "%) | "
+    return lines.rstrip(" | ")
+
+
+def format_alert(price, quote, result, ind, mtf, events, ai_text, validated):
+    sig = result.get("sig", "N/A")
+    conf = result.get("conf", 0)
+    entry = result.get("entry", price)
+    tp = result.get("tp")
+    sl = result.get("sl")
+    rr = result.get("rr")
+    now = datetime.now().strftime("%H:%M - %d/%m/%Y")
+
+    direction = "LONG (ACHAT)" if sig == "BUY" else "SHORT (VENTE)"
+    gain = round(abs(tp - entry), 2) if tp else 0
+    risk = round(abs(sl - entry), 2) if sl else 0
+    ai_verdict = "OUI - TRADE VALIDE" if validated else "NON - TRADE REJETE"
+
+    events_text = ""
+    if events:
+        for ev in events:
+            events_text += "  - " + ev.get("name", "") + " (" + ev.get("time", "") + ")\n"
+    else:
+        events_text = "  Aucun evenement majeur\n"
+
+    msg = (
+        "ALERTE TRADE XAU/USD\n"
+        "`" + now + "`\n\n"
+        "---\n"
+        "*SIGNAL: " + direction + "*\n"
+        "Fiabilite indicateurs: *" + str(conf) + "%*\n"
+        "Validation Claude AI: *" + ai_verdict + "*\n\n"
+        "*MULTI-TIMEFRAME*\n"
+        "" + format_mtf_line(mtf) + "\n\n"
+        "---\n"
+        "*TRADE A PRENDRE*\n"
+        "Entree:      `" + str(round(entry, 2)) + "`\n"
+        "Take Profit: `" + str(tp) + "`\n"
+        "Stop Loss:   `" + str(sl) + "`\n"
+        "Ratio R/R:   `1:" + str(rr) + "`\n"
+        "Gain potentiel: `+" + str(gain) + " USD/oz`\n"
+        "Risque max:     `-" + str(risk) + " USD/oz`\n\n"
+        "---\n"
+        "*PRIX ACTUEL*\n"
+        "`" + str(round(price, 2)) + " USD/oz`\n\n"
+        "---\n"
+        "*NEWS A SURVEILLER*\n"
+        "" + events_text + "\n"
+        "---\n"
+        "*ANALYSE ET CONSEIL CLAUDE AI*\n\n"
+        "" + ai_text + "\n\n"
+        "---\n"
+        "_Signaux indicatifs uniquement_\n"
+        "_Pas un conseil financier_\n"
+        "_Utilisez toujours un stop loss_"
+    )
+    return msg
+
+
+def format_analyse(price, quote, result, ind, mtf, events, validated, ai_text):
+    sig = result.get("sig", "N/A")
+    conf = result.get("conf", 0)
+    entry = result.get("entry", price)
+    tp = result.get("tp")
+    sl = result.get("sl")
+    rr = result.get("rr")
+    now = datetime.now().strftime("%H:%M - %d/%m/%Y")
+
+    conf_label = "FIABLE" if conf >= 70 else ("MOYEN" if conf >= 55 else "FAIBLE")
+    sig_label = "ACHAT" if sig == "BUY" else ("VENTE" if sig == "SELL" else "NEUTRE")
+    chg = ("+" if quote["change"] >= 0 else "") + str(round(quote["change"], 2))
+    pct = ("+" if quote["pct"] >= 0 else "") + str(round(quote["pct"], 2))
+    reasons_text = "\n".join("  - " + r for r in result.get("reasons", []))
+    rsi_label = "Surachat" if ind.get("rsi", 50) > 70 else ("Survente" if ind.get("rsi", 50) < 30 else "Neutre")
+    confluence_sig, confluence_conf = mtf_confluence(mtf)
+    aligned = "OUI - signal fort" if confluence_sig == sig and sig != "NEUTRE" else "NON - prudence"
+    ai_verdict = "OUI - TRADE VALIDE" if validated else "NON - TRADE REJETE"
+
+    events_text = ""
+    if events:
+        for ev in events:
+            events_text += "  - " + ev.get("name", "") + " (" + ev.get("time", "") + ")\n"
+    else:
+        events_text = "  Aucun evenement majeur\n"
+
+    msg = (
+        "*XAU/USD - SIGNAL PRO*\n"
+        "`" + now + "`\n\n"
+        "---\n"
+        "*MULTI-TIMEFRAME*\n"
+        "" + format_mtf_line(mtf) + "\n"
+        "Confluence: `" + aligned + "`\n\n"
+        "---\n"
+        "*PRIX EN DIRECT*\n"
+        "`" + str(round(price, 2)) + " USD/oz`\n"
+        "" + chg + " USD (" + pct + "%)\n\n"
+        "---\n"
+        "*SIGNAL: " + sig_label + "*\n"
+        "Fiabilite indicateurs: *" + str(conf) + "%* [" + conf_label + "]\n"
+        "Validation Claude AI: *" + ai_verdict + "*\n\n"
+        "Entree:      `" + str(round(entry, 2)) + "`\n"
+        "Take Profit: `" + str(tp if tp else "---") + "`\n"
+        "Stop Loss:   `" + str(sl if sl else "---") + "`\n"
+        "Ratio R/R:   `1:" + str(rr if rr else "---") + "`\n\n"
+        "---\n"
+        "*RAISONS DU SIGNAL*\n"
+        "" + reasons_text + "\n\n"
+        "---\n"
+        "*INDICATEURS H1*\n"
+        "RSI:      `" + str(ind.get("rsi", "N/A")) + "` [" + rsi_label + "]\n"
+        "MACD:     `" + str(ind.get("macd", {}).get("hist", "N/A")) + "`\n"
+        "ADX:      `" + str(ind.get("adx", {}).get("adx", "N/A")) + "`\n"
+        "Stoch:    `" + str(ind.get("stoch", {}).get("k", "N/A")) + "/" + str(ind.get("stoch", {}).get("d", "N/A")) + "`\n"
+        "BB:       `" + str(ind.get("bb", {}).get("lower", "N/A")) + "` / `" + str(ind.get("bb", {}).get("upper", "N/A")) + "`\n"
+        "ATR:      `" + str(ind.get("atr", "N/A")) + "`\n"
+        "Support:  `" + str(ind.get("res", {}).get("sup", "N/A")) + "`\n"
+        "Resist:   `" + str(ind.get("res", {}).get("res", "N/A")) + "`\n\n"
+        "---\n"
+        "*NEWS DU JOUR*\n"
+        "" + events_text + "\n"
+        "---\n"
+        "*ANALYSE ET CONSEIL CLAUDE AI*\n\n"
+        "" + ai_text + "\n\n"
+        "---\n"
+        "_Signaux indicatifs uniquement_\n"
+        "_Pas un conseil financier_\n"
+        "_Utilisez toujours un stop loss_"
+    )
+    return msg
+
 
 def get_daily_report_ai(price, quote, mtf, events, dxy):
     if not ANTHROPIC_KEY:
@@ -545,13 +707,13 @@ def get_daily_report_ai(price, quote, mtf, events, dxy):
         "DXY: " + dxy_str + "\n\n"
         "CALENDRIER ECONOMIQUE AUJOURD HUI:\n"
         "" + events_str + "\n"
-        "Redige un rapport matinal structure en 5 sections:\n\n"
+        "Redige un rapport matinal structure:\n\n"
         "BONJOUR - RAPPORT XAU/USD DU " + today + "\n\n"
         "1. RESUME MARCHE: Situation actuelle de l or en 2 phrases\n"
         "2. BIAIS DU JOUR: Plutot haussier ou baissier aujourd hui et pourquoi\n"
         "3. NIVEAUX CLES: Support et resistance a surveiller aujourd hui\n"
         "4. AGENDA DU JOUR: Quels evenements economiques peuvent bouger l or\n"
-        "5. STRATEGIE CONSEILEE: Que faire aujourd hui (attendre, acheter sur support, vendre sur resistance)\n\n"
+        "5. STRATEGIE: Que faire aujourd hui\n\n"
         "En francais simple et direct."
     )
 
@@ -573,145 +735,6 @@ def get_daily_report_ai(price, quote, mtf, events, dxy):
     return "".join(b.get("text", "") for b in d.get("content", []))
 
 
-# ── FORMATAGE MESSAGES ────────────────────────────────────────────
-
-def format_mtf_line(mtf):
-    lines = ""
-    icons = {"BUY": "BUY", "SELL": "SELL", "NEUTRE": "NEUTRE", "ERREUR": "ERREUR"}
-    for tf in ["H1", "H4", "D1"]:
-        sig = mtf.get(tf, {}).get("signal", "N/A")
-        conf = mtf.get(tf, {}).get("conf", 0)
-        lines += tf + ": `" + sig + "` (" + str(conf) + "%) | "
-    return lines.rstrip(" | ")
-
-
-def format_analyse(price, quote, result, ind, mtf, events, ai_text):
-    sig = result.get("sig", "N/A")
-    conf = result.get("conf", 0)
-    entry = result.get("entry", price)
-    tp = result.get("tp")
-    sl = result.get("sl")
-    rr = result.get("rr")
-    now = datetime.now().strftime("%H:%M - %d/%m/%Y")
-
-    conf_label = "FIABLE" if conf >= 70 else ("MOYEN" if conf >= 55 else "FAIBLE")
-    sig_label = "ACHAT" if sig == "BUY" else ("VENTE" if sig == "SELL" else "NEUTRE")
-    chg = ("+" if quote["change"] >= 0 else "") + str(round(quote["change"], 2))
-    pct = ("+" if quote["pct"] >= 0 else "") + str(round(quote["pct"], 2))
-
-    reasons_text = "\n".join("  - " + r for r in result.get("reasons", []))
-    rsi_label = "Surachat" if ind.get("rsi", 50) > 70 else ("Survente" if ind.get("rsi", 50) < 30 else "Neutre")
-
-    confluence_sig, confluence_conf = mtf_confluence(mtf)
-    aligned = "OUI - signal fort" if confluence_sig == sig and sig != "NEUTRE" else "NON - prudence"
-
-    events_text = ""
-    if events:
-        for ev in events:
-            events_text += "  - " + ev.get("name", "") + " (" + ev.get("time", "") + ")\n"
-    else:
-        events_text = "  Aucun evenement majeur\n"
-
-    msg = (
-        "*XAU/USD - SIGNAL PRO*\n"
-        "`" + now + "`\n\n"
-        "---\n"
-        "*MULTI-TIMEFRAME*\n"
-        "" + format_mtf_line(mtf) + "\n"
-        "Confluence: `" + aligned + "`\n\n"
-        "---\n"
-        "*PRIX EN DIRECT*\n"
-        "`" + str(round(price, 2)) + " USD/oz`\n"
-        "" + chg + " USD (" + pct + "%)\n\n"
-        "---\n"
-        "*SIGNAL: " + sig_label + "*\n"
-        "Fiabilite: *" + str(conf) + "%* [" + conf_label + "]\n\n"
-        "Entree:      `" + str(round(entry, 2)) + "`\n"
-        "Take Profit: `" + str(tp if tp else "---") + "`\n"
-        "Stop Loss:   `" + str(sl if sl else "---") + "`\n"
-        "Ratio R/R:   `1:" + str(rr if rr else "---") + "`\n\n"
-        "---\n"
-        "*RAISONS DU SIGNAL*\n"
-        "" + reasons_text + "\n\n"
-        "---\n"
-        "*INDICATEURS H1*\n"
-        "RSI:      `" + str(ind.get("rsi", "N/A")) + "` [" + rsi_label + "]\n"
-        "MACD:     `" + str(ind.get("macd", {}).get("hist", "N/A")) + "`\n"
-        "ADX:      `" + str(ind.get("adx", {}).get("adx", "N/A")) + "`\n"
-        "Stoch:    `" + str(ind.get("stoch", {}).get("k", "N/A")) + "/" + str(ind.get("stoch", {}).get("d", "N/A")) + "`\n"
-        "BB:       `" + str(ind.get("bb", {}).get("lower", "N/A")) + "` / `" + str(ind.get("bb", {}).get("upper", "N/A")) + "`\n"
-        "ATR:      `" + str(ind.get("atr", "N/A")) + "`\n"
-        "Support:  `" + str(ind.get("res", {}).get("sup", "N/A")) + "`\n"
-        "Resist:   `" + str(ind.get("res", {}).get("res", "N/A")) + "`\n\n"
-        "---\n"
-        "*NEWS DU JOUR*\n"
-        "" + events_text + "\n"
-        "---\n"
-        "*ANALYSE CLAUDE AI*\n\n"
-        "" + ai_text + "\n\n"
-        "---\n"
-        "_Signaux indicatifs uniquement_\n"
-        "_Pas un conseil financier_\n"
-        "_Utilisez toujours un stop loss_"
-    )
-    return msg
-
-
-def format_alert(price, quote, result, ind, mtf, events, ai_text):
-    sig = result.get("sig", "N/A")
-    conf = result.get("conf", 0)
-    entry = result.get("entry", price)
-    tp = result.get("tp")
-    sl = result.get("sl")
-    rr = result.get("rr")
-    now = datetime.now().strftime("%H:%M - %d/%m/%Y")
-
-    direction = "LONG (ACHAT)" if sig == "BUY" else "SHORT (VENTE)"
-    gain = round(abs(tp - entry), 2) if tp else 0
-    risk = round(abs(sl - entry), 2) if sl else 0
-
-    events_text = ""
-    if events:
-        for ev in events:
-            events_text += "  - " + ev.get("name", "") + " (" + ev.get("time", "") + ")\n"
-    else:
-        events_text = "  Aucun evenement majeur\n"
-
-    msg = (
-        "ALERTE TRADE XAU/USD\n"
-        "`" + now + "`\n\n"
-        "---\n"
-        "*SIGNAL: " + direction + "*\n"
-        "Fiabilite: *" + str(conf) + "%* [FIABLE]\n\n"
-        "*MULTI-TIMEFRAME*\n"
-        "" + format_mtf_line(mtf) + "\n\n"
-        "---\n"
-        "*TRADE A PRENDRE*\n"
-        "Entree:      `" + str(round(entry, 2)) + "`\n"
-        "Take Profit: `" + str(tp) + "`\n"
-        "Stop Loss:   `" + str(sl) + "`\n"
-        "Ratio R/R:   `1:" + str(rr) + "`\n"
-        "Gain potentiel: `+" + str(gain) + " USD/oz`\n"
-        "Risque max:     `-" + str(risk) + " USD/oz`\n\n"
-        "---\n"
-        "*PRIX ACTUEL*\n"
-        "`" + str(round(price, 2)) + " USD/oz`\n\n"
-        "---\n"
-        "*NEWS A SURVEILLER*\n"
-        "" + events_text + "\n"
-        "---\n"
-        "*ANALYSE CLAUDE AI*\n\n"
-        "" + ai_text + "\n\n"
-        "---\n"
-        "_Signaux indicatifs uniquement_\n"
-        "_Pas un conseil financier_\n"
-        "_Utilisez toujours un stop loss_"
-    )
-    return msg
-
-
-# ── COMMANDES BOT ─────────────────────────────────────────────────
-
 def handle(update):
     msg = update.get("message", {})
     chat_id = msg.get("chat", {}).get("id")
@@ -723,19 +746,22 @@ def handle(update):
     if text in ["/start", "/aide", "/help"]:
         subscribers.add(chat_id)
         send(chat_id, (
-            "*XAU/USD Signal Pro*\n\n"
-            "Bienvenue ! Tu es abonne aux alertes automatiques.\n\n"
+            "*XAU/USD Signal Pro v5*\n\n"
+            "Bienvenue ! Alertes automatiques activees.\n\n"
             "Commandes:\n\n"
-            "/analyse - Analyse complete multi-timeframe\n"
+            "/analyse - Analyse complete + validation AI\n"
             "/prix - Prix actuel XAU/USD\n"
             "/news - Evenements economiques du jour\n"
             "/rapport - Rapport marche complet\n"
-            "/alertes - Activer les alertes auto (>80%)\n"
+            "/alertes - Activer les alertes auto\n"
             "/stop - Desactiver les alertes\n"
             "/aide - Ce message\n\n"
-            "Le bot scanne H1 + H4 + D1 toutes les 5 minutes.\n"
-            "Alerte automatique quand fiabilite > 80%.\n"
-            "Rapport quotidien envoye chaque matin a 8h.\n\n"
+            "Fonctionnement:\n"
+            "1. Les indicateurs calculent un signal technique\n"
+            "2. Claude AI valide ou invalide le signal\n"
+            "3. Tu recois l alerte uniquement si Claude dit OUI\n"
+            "4. Scan toutes les 5 min sur H1+H4+D1\n"
+            "5. Rapport automatique chaque matin a 8h\n\n"
             "_Pas un conseil financier. Utilisez toujours un stop loss._"
         ))
 
@@ -743,8 +769,9 @@ def handle(update):
         subscribers.add(chat_id)
         send(chat_id,
             "Alertes automatiques ACTIVEES.\n"
-            "Signal > 80% fiabilite + confirmation multi-timeframe.\n"
-            "Scan toutes les 5 minutes sur H1, H4 et D1."
+            "Signal > 80% + validation Claude AI requise.\n"
+            "Delai minimum 30min entre deux alertes identiques.\n"
+            "Scan H1 + H4 + D1 toutes les 5 minutes."
         )
 
     elif text == "/stop":
@@ -796,13 +823,13 @@ def handle(update):
         typing(chat_id)
         send(chat_id,
             "Analyse multi-timeframe en cours...\n"
-            "H1 + H4 + D1 + calendrier economique\n"
+            "H1 + H4 + D1 + validation Claude AI\n"
             "Environ 20-30 secondes."
         )
         try:
             price, quote, result, ind, mtf, events, dxy = run_full_analysis()
-            ai_text = get_ai_analysis(price, result, ind, quote, mtf, events, dxy)
-            message = format_analyse(price, quote, result, ind, mtf, events, ai_text)
+            validated, ai_text = claude_validate_signal(price, result, ind, quote, mtf, events, dxy)
+            message = format_analyse(price, quote, result, ind, mtf, events, validated, ai_text)
             send(chat_id, message)
         except Exception as e:
             send(chat_id, "Erreur analyse: " + str(e))
@@ -814,8 +841,6 @@ def handle(update):
         )
 
 
-# ── SCAN AUTOMATIQUE ──────────────────────────────────────────────
-
 def auto_scan():
     print("Scan automatique lance...")
     while True:
@@ -825,24 +850,32 @@ def auto_scan():
                 price, quote, result, ind, mtf, events, dxy = run_full_analysis()
                 sig = result.get("sig", "NEUTRE")
                 conf = result.get("conf", 0)
-
                 confluence_sig, confluence_conf = mtf_confluence(mtf)
                 aligned = (confluence_sig == sig and sig != "NEUTRE")
 
                 if sig != "NEUTRE" and conf >= ALERT_THRESHOLD and aligned:
+                    now_ts = time.time()
+                    last_time = last_alert_time.get(sig, 0)
                     last_sig = last_alert_sig.get("last", "")
-                    last_conf = last_alert_sig.get("conf", 0)
+                    time_ok = (now_ts - last_time) >= MIN_ALERT_DELAY
+                    sig_changed = (sig != last_sig)
 
-                    if sig != last_sig or abs(conf - last_conf) >= 5:
-                        print("ALERTE! Signal=" + sig + " Conf=" + str(conf) + "% Aligne=" + str(aligned))
-                        ai_text = get_ai_analysis(price, result, ind, quote, mtf, events, dxy)
-                        message = format_alert(price, quote, result, ind, mtf, events, ai_text)
+                    if time_ok or sig_changed:
+                        print("Validation Claude AI en cours...")
+                        validated, ai_text = claude_validate_signal(price, result, ind, quote, mtf, events, dxy)
 
-                        for chat_id in list(subscribers):
-                            send(chat_id, message)
-
-                        last_alert_sig["last"] = sig
-                        last_alert_sig["conf"] = conf
+                        if validated:
+                            print("ALERTE VALIDEE! Signal=" + sig + " Conf=" + str(conf) + "%")
+                            message = format_alert(price, quote, result, ind, mtf, events, ai_text, validated)
+                            for chat_id in list(subscribers):
+                                send(chat_id, message)
+                            last_alert_time[sig] = now_ts
+                            last_alert_sig["last"] = sig
+                        else:
+                            print("Signal REJETE par Claude AI. Signal=" + sig + " Conf=" + str(conf) + "%")
+                    else:
+                        mins_left = round((MIN_ALERT_DELAY - (now_ts - last_time)) / 60)
+                        print("Signal=" + sig + " Conf=" + str(conf) + "% - Delai: encore " + str(mins_left) + " min")
                 else:
                     print("Signal=" + sig + " Conf=" + str(conf) + "% Aligne=" + str(aligned) + " - pas d alerte")
             else:
@@ -853,8 +886,6 @@ def auto_scan():
 
         time.sleep(SCAN_INTERVAL)
 
-
-# ── RAPPORT QUOTIDIEN A 8H ────────────────────────────────────────
 
 def daily_report_scheduler():
     print("Planificateur rapport quotidien demarre...")
@@ -871,19 +902,19 @@ def daily_report_scheduler():
                     for chat_id in list(subscribers):
                         send(chat_id, ai_text)
                     last_report_day = current_day
-                    print("Rapport quotidien envoye a " + str(len(subscribers)) + " abonnes")
+                    print("Rapport envoye a " + str(len(subscribers)) + " abonnes")
         except Exception as e:
             print("Erreur rapport quotidien: " + str(e))
         time.sleep(60)
 
 
-# ── MAIN ──────────────────────────────────────────────────────────
-
 def main():
-    print("Bot XAU/USD Signal Pro v4 demarre...")
+    print("Bot XAU/USD Signal Pro v5 demarre...")
     print("Seuil alerte: " + str(ALERT_THRESHOLD) + "%")
+    print("Delai minimum entre alertes: " + str(MIN_ALERT_DELAY // 60) + " minutes")
     print("Intervalle scan: " + str(SCAN_INTERVAL) + "s")
     print("Rapport quotidien: 8h00")
+    print("Validation Claude AI: ACTIVEE")
 
     scan_thread = threading.Thread(target=auto_scan, daemon=True)
     scan_thread.start()

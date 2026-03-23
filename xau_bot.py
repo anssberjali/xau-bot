@@ -9,6 +9,12 @@ ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "")
 SYMBOL = "XAU/USD"
 API_URL = "https://api.telegram.org/bot" + TG_TOKEN
 
+ALERT_THRESHOLD = 80
+SCAN_INTERVAL = 300
+
+subscribers = set()
+last_alert_sig = {}
+
 
 def send(chat_id, text):
     try:
@@ -284,12 +290,17 @@ def build_signal(price, ind):
 
     a = ind["atr"]
     tp = sl = rr = None
+    entry = price
+
     if sig == "BUY":
-        tp = round(price + a * 2, 2)
+        entry = round(price, 2)
+        tp = round(price + a * 2.5, 2)
         sl = round(price - a * 1.2, 2)
     if sig == "SELL":
-        tp = round(price - a * 2, 2)
+        entry = round(price, 2)
+        tp = round(price - a * 2.5, 2)
         sl = round(price + a * 1.2, 2)
+
     if tp and sl:
         g = abs(tp - price)
         r = abs(sl - price)
@@ -299,7 +310,8 @@ def build_signal(price, ind):
     reasons = [s["label"] for s in S if s["dir"] == dir_filter][:5]
 
     return {
-        "sig": sig, "conf": conf, "tp": tp, "sl": sl, "rr": rr,
+        "sig": sig, "conf": conf, "entry": entry,
+        "tp": tp, "sl": sl, "rr": rr,
         "bW": bW, "rW": rW, "reasons": reasons
     }
 
@@ -315,7 +327,8 @@ def get_ai_analysis(price, result, ind, quote):
         "DONNEES MARCHE EN TEMPS REEL:\n"
         "Prix: " + str(round(price, 2)) + " USD/oz\n"
         "Variation: " + str(round(quote["change"], 2)) + " (" + str(round(quote["pct"], 2)) + "%)\n"
-        "Signal technique: " + result["sig"] + " avec " + str(result["conf"]) + "% de fiabilite\n"
+        "Signal: " + result["sig"] + " avec " + str(result["conf"]) + "% de fiabilite\n"
+        "Entree: " + str(result["entry"]) + "\n"
         "TP: " + str(result["tp"]) + " | SL: " + str(result["sl"]) + " | Ratio RR: 1:" + str(result["rr"]) + "\n"
         "RSI: " + str(ind["rsi"]) + "\n"
         "MACD histogramme: " + str(ind["macd"]["hist"]) + "\n"
@@ -330,7 +343,7 @@ def get_ai_analysis(price, result, ind, quote):
         "1. SIGNAL TECHNIQUE: Explique pourquoi le signal est " + result["sig"] + " en 2-3 phrases simples\n"
         "2. CONTEXTE MACRO: Dollar, Fed, inflation, geopolitique - quel est leur impact sur l or aujourd hui\n"
         "3. CATALYSEURS: 2-3 evenements ou donnees economiques a surveiller cette semaine\n"
-        "4. CONSEIL FINAL: Valides-tu ce trade ? Entree recommandee, SL, TP, taille de position conseille\n\n"
+        "4. CONSEIL FINAL: Valides-tu ce trade ? Entree recommandee, SL, TP, taille de position conseillee\n\n"
         "Sois direct et concis. En francais simple pour un trader debutant."
     )
 
@@ -352,9 +365,71 @@ def get_ai_analysis(price, result, ind, quote):
     return "".join(b.get("text", "") for b in d.get("content", []))
 
 
-def format_message(price, quote, result, ind, ai_text):
+def format_alert(price, quote, result, ind, ai_text):
     sig = result["sig"]
     conf = result["conf"]
+    entry = result["entry"]
+    tp = result["tp"]
+    sl = result["sl"]
+    rr = result["rr"]
+    now = datetime.now().strftime("%H:%M - %d/%m/%Y")
+
+    if sig == "BUY":
+        sig_line = "SIGNAL: ACHAT (BUY)"
+        direction = "LONG"
+    else:
+        sig_line = "SIGNAL: VENTE (SELL)"
+        direction = "SHORT"
+
+    chg = ("+" if quote["change"] >= 0 else "") + str(round(quote["change"], 2))
+    pct = ("+" if quote["pct"] >= 0 else "") + str(round(quote["pct"], 2))
+    reasons_text = "\n".join("  - " + r for r in result["reasons"])
+
+    msg = (
+        "ALERTE TRADE XAU/USD\n"
+        "`" + now + "`\n\n"
+        "---\n"
+        "*" + sig_line + "*\n"
+        "Direction: *" + direction + "*\n"
+        "Fiabilite: *" + str(conf) + "%* [FIABLE]\n\n"
+        "---\n"
+        "*TRADE A PRENDRE*\n"
+        "Entree:      `" + str(entry) + "`\n"
+        "Take Profit: `" + str(tp) + "`\n"
+        "Stop Loss:   `" + str(sl) + "`\n"
+        "Ratio R/R:   `1:" + str(rr) + "`\n"
+        "Gain potentiel: `+" + str(round(abs(tp - entry), 2)) + " USD/oz`\n"
+        "Risque max:     `-" + str(round(abs(sl - entry), 2)) + " USD/oz`\n\n"
+        "---\n"
+        "*PRIX ACTUEL*\n"
+        "`" + str(round(price, 2)) + " USD/oz` (" + chg + " | " + pct + "%)\n\n"
+        "---\n"
+        "*RAISONS DU SIGNAL*\n"
+        "" + reasons_text + "\n\n"
+        "---\n"
+        "*INDICATEURS*\n"
+        "RSI:      `" + str(ind["rsi"]) + "`\n"
+        "MACD:     `" + str(ind["macd"]["hist"]) + "`\n"
+        "ADX:      `" + str(ind["adx"]["adx"]) + "`\n"
+        "Stoch:    `" + str(ind["stoch"]["k"]) + "/" + str(ind["stoch"]["d"]) + "`\n"
+        "CCI:      `" + str(ind["cci"]) + "`\n"
+        "Williams: `" + str(ind["wr"]) + "`\n"
+        "ATR:      `" + str(ind["atr"]) + "`\n\n"
+        "---\n"
+        "*ANALYSE CLAUDE AI*\n\n"
+        "" + ai_text + "\n\n"
+        "---\n"
+        "_Signaux indicatifs uniquement_\n"
+        "_Pas un conseil financier_\n"
+        "_Utilisez toujours un stop loss_"
+    )
+    return msg
+
+
+def format_analyse(price, quote, result, ind, ai_text):
+    sig = result["sig"]
+    conf = result["conf"]
+    entry = result["entry"]
     tp = result["tp"]
     sl = result["sl"]
     rr = result["rr"]
@@ -368,18 +443,21 @@ def format_message(price, quote, result, ind, ai_text):
         conf_label = "FAIBLE"
 
     if sig == "BUY":
-        sig_icon = "ACHAT"
+        sig_label = "ACHAT"
     elif sig == "SELL":
-        sig_icon = "VENTE"
+        sig_label = "VENTE"
     else:
-        sig_icon = "NEUTRE"
+        sig_label = "NEUTRE"
 
     chg = ("+" if quote["change"] >= 0 else "") + str(round(quote["change"], 2))
     pct = ("+" if quote["pct"] >= 0 else "") + str(round(quote["pct"], 2))
-
     reasons_text = "\n".join("  - " + r for r in result["reasons"])
-
     rsi_label = "Surachat" if ind["rsi"] > 70 else ("Survente" if ind["rsi"] < 30 else "Neutre")
+
+    tp_str = str(tp) if tp else "---"
+    sl_str = str(sl) if sl else "---"
+    rr_str = str(rr) if rr else "---"
+    entry_str = str(entry) if entry else "---"
 
     msg = (
         "*XAU/USD - SIGNAL PRO*\n"
@@ -389,11 +467,12 @@ def format_message(price, quote, result, ind, ai_text):
         "`" + str(round(price, 2)) + " USD/oz`\n"
         "" + chg + " USD (" + pct + "%)\n\n"
         "---\n"
-        "*SIGNAL: " + sig_icon + "*\n"
+        "*SIGNAL: " + sig_label + "*\n"
         "Fiabilite: *" + str(conf) + "%* [" + conf_label + "]\n\n"
-        "Take Profit:  `" + str(tp if tp else "---") + "`\n"
-        "Stop Loss:    `" + str(sl if sl else "---") + "`\n"
-        "Ratio R/R:    `1:" + str(rr if rr else "---") + "`\n\n"
+        "Entree:      `" + entry_str + "`\n"
+        "Take Profit: `" + tp_str + "`\n"
+        "Stop Loss:   `" + sl_str + "`\n"
+        "Ratio R/R:   `1:" + rr_str + "`\n\n"
         "---\n"
         "*RAISONS DU SIGNAL*\n"
         "" + reasons_text + "\n\n"
@@ -421,6 +500,34 @@ def format_message(price, quote, result, ind, ai_text):
     return msg
 
 
+def run_analysis():
+    closes, highs, lows = get_history()
+    quote = get_quote()
+    price = quote["price"]
+    closes.append(price)
+    highs.append(quote["high"])
+    lows.append(quote["low"])
+
+    ind = {
+        "rsi": calc_rsi(closes),
+        "macd": calc_macd(closes),
+        "e20": ema(last_n(closes, 20), 20),
+        "e50": ema(last_n(closes, 50), 50),
+        "e200": ema(last_n(closes, 200), 200),
+        "adx": calc_adx(closes),
+        "bb": calc_bb(closes),
+        "stoch": calc_stoch(closes, highs, lows),
+        "cci": calc_cci(closes),
+        "wr": calc_wr(closes, highs, lows),
+        "atr": calc_atr(closes, highs, lows),
+        "psar": calc_psar(closes, highs, lows),
+        "res": calc_supres(closes),
+    }
+
+    result = build_signal(price, ind)
+    return price, quote, result, ind
+
+
 def handle(update):
     msg = update.get("message", {})
     chat_id = msg.get("chat", {}).get("id")
@@ -430,15 +537,32 @@ def handle(update):
         return
 
     if text in ["/start", "/aide", "/help"]:
+        subscribers.add(chat_id)
         send(chat_id, (
             "*XAU/USD Signal Pro*\n\n"
-            "Bienvenue ! Voici les commandes:\n\n"
-            "/analyse - Analyse complete en temps reel\n"
+            "Bienvenue ! Tu es abonne aux alertes automatiques.\n\n"
+            "Commandes:\n\n"
+            "/analyse - Analyse complete maintenant\n"
             "/prix - Prix actuel XAU/USD\n"
-            "/aide - Afficher ce message\n\n"
-            "Le bot analyse 11 indicateurs techniques + contexte macro pour te donner un signal BUY/SELL valide.\n\n"
+            "/alertes - Activer les alertes auto\n"
+            "/stop - Desactiver les alertes\n"
+            "/aide - Ce message\n\n"
+            "Le bot scanne le marche toutes les 5 minutes.\n"
+            "Tu recois une alerte automatique quand la fiabilite depasse 80%.\n\n"
             "_Pas un conseil financier. Utilisez toujours un stop loss._"
         ))
+
+    elif text == "/alertes":
+        subscribers.add(chat_id)
+        send(chat_id,
+            "Alertes automatiques ACTIVEES.\n"
+            "Tu recevras un message quand le signal depasse 80% de fiabilite.\n"
+            "Scan toutes les 5 minutes."
+        )
+
+    elif text == "/stop":
+        subscribers.discard(chat_id)
+        send(chat_id, "Alertes automatiques DESACTIVEES.")
 
     elif text == "/prix":
         typing(chat_id)
@@ -455,53 +579,72 @@ def handle(update):
             send(chat_id, "Erreur prix: " + str(e))
 
     elif text in ["/analyse", "/signal", "/a"]:
+        subscribers.add(chat_id)
         typing(chat_id)
         send(chat_id,
             "Analyse en cours...\n"
             "Recuperation donnees + analyse AI\n"
-            "Environ 15-20 secondes, patientez."
+            "Environ 15-20 secondes."
         )
         try:
-            closes, highs, lows = get_history()
-            quote = get_quote()
-            price = quote["price"]
-            closes.append(price)
-            highs.append(quote["high"])
-            lows.append(quote["low"])
-
-            ind = {
-                "rsi": calc_rsi(closes),
-                "macd": calc_macd(closes),
-                "e20": ema(last_n(closes, 20), 20),
-                "e50": ema(last_n(closes, 50), 50),
-                "e200": ema(last_n(closes, 200), 200),
-                "adx": calc_adx(closes),
-                "bb": calc_bb(closes),
-                "stoch": calc_stoch(closes, highs, lows),
-                "cci": calc_cci(closes),
-                "wr": calc_wr(closes, highs, lows),
-                "atr": calc_atr(closes, highs, lows),
-                "psar": calc_psar(closes, highs, lows),
-                "res": calc_supres(closes),
-            }
-
-            result = build_signal(price, ind)
+            price, quote, result, ind = run_analysis()
             ai_text = get_ai_analysis(price, result, ind, quote)
-            message = format_message(price, quote, result, ind, ai_text)
+            message = format_analyse(price, quote, result, ind, ai_text)
             send(chat_id, message)
-
         except Exception as e:
-            send(chat_id, "Erreur lors de l analyse: " + str(e))
+            send(chat_id, "Erreur: " + str(e))
 
     else:
         send(chat_id,
             "Commande non reconnue.\n"
-            "Tape /aide pour voir les commandes disponibles."
+            "Tape /aide pour voir les commandes."
         )
 
 
+def auto_scan():
+    print("Scan automatique lance...")
+    while True:
+        try:
+            if subscribers:
+                print("Scan marche... " + str(len(subscribers)) + " abonnes")
+                price, quote, result, ind = run_analysis()
+                sig = result["sig"]
+                conf = result["conf"]
+
+                if sig != "NEUTRE" and conf >= ALERT_THRESHOLD:
+                    last_sig = last_alert_sig.get("last", "")
+                    last_conf = last_alert_sig.get("conf", 0)
+
+                    if sig != last_sig or abs(conf - last_conf) >= 5:
+                        print("Alerte! Signal=" + sig + " Conf=" + str(conf) + "%")
+                        ai_text = get_ai_analysis(price, result, ind, quote)
+                        message = format_alert(price, quote, result, ind, ai_text)
+
+                        for chat_id in list(subscribers):
+                            send(chat_id, message)
+
+                        last_alert_sig["last"] = sig
+                        last_alert_sig["conf"] = conf
+                else:
+                    print("Signal=" + sig + " Conf=" + str(conf) + "% - pas d alerte")
+            else:
+                print("Aucun abonne, scan ignore")
+
+        except Exception as e:
+            print("Erreur scan: " + str(e))
+
+        time.sleep(SCAN_INTERVAL)
+
+
 def main():
-    print("Bot XAU/USD demarre...")
+    import threading
+    print("Bot XAU/USD Signal Pro demarre...")
+    print("Seuil alerte: " + str(ALERT_THRESHOLD) + "%")
+    print("Intervalle scan: " + str(SCAN_INTERVAL) + "s")
+
+    scan_thread = threading.Thread(target=auto_scan, daemon=True)
+    scan_thread.start()
+
     offset = 0
     while True:
         try:
@@ -515,7 +658,7 @@ def main():
                 offset = u["update_id"] + 1
                 handle(u)
         except Exception as e:
-            print("Erreur: " + str(e))
+            print("Erreur polling: " + str(e))
             time.sleep(5)
 
 

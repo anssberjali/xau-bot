@@ -6,6 +6,23 @@ import json
 from datetime import datetime, timedelta
 from math import sqrt
 
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+def supabase_insert(table, data):
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return False
+    try:
+        requests.post(
+            SUPABASE_URL + "/rest/v1/" + table,
+            headers={"apikey": SUPABASE_KEY,
+                     "Authorization": "Bearer " + SUPABASE_KEY,
+                     "Content-Type": "application/json"},
+            json=data, timeout=8)
+        return True
+    except:
+        return False
+
 TG_TOKEN = os.environ.get("TG_TOKEN", "")
 TWELVE_KEY = os.environ.get("TWELVE_KEY", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "")
@@ -2302,6 +2319,20 @@ def auto_scan():
                         if validated:
                             print("ALERTE VALIDEE: " + sig + " " + str(conf) + "%")
                             record_signal(sig, conf, result["entry"], result["tp2"], result["sl"])
+                            supabase_insert("signals", {
+    "signal": sig,
+    "confidence": conf,
+    "entry_price": result["entry"],
+    "tp1": result["tp1"],
+    "tp2": result["tp2"],
+    "tp3": result["tp3"],
+    "sl": result["sl"],
+    "rr": result["rr"],
+    "structure": structure,
+    "session": session["session"],
+    "validated": True,
+    "outcome": "OPEN"
+})
                             for chat_id in list(subscribers):
                                 message = format_precise_alert(
                                     price, quote, result, ind, mtf, events, news,

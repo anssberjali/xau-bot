@@ -1231,13 +1231,19 @@ def build_signal(price, ind, corr_signal="neut", struct_signal="neut", cot_signa
     }
 
 
-def multi_timeframe_analysis(corr_signal="neut", struct_signal="neut", cot_signal="neut", fred_signal="neut", fg_signal="neut"):
+def multi_timeframe_analysis(corr_signal="neut", struct_signal="neut", cot_signal="neut", fred_signal="neut", fg_signal="neut", h1_data=None):
     results = {}
-    for i, (interval, label) in enumerate([("1h", "H1"), ("4h", "H4"), ("1day", "D1")]):
+    timeframes = [("1h", "H1"), ("4h", "H4"), ("1day", "D1")]
+    for i, (interval, label) in enumerate(timeframes):
         try:
-            if i > 0:
-                time.sleep(12)  # 12s entre appels = max 5 appels/minute
-            closes, highs, lows, opens, times, volumes = get_history(interval, 200)
+            if label == "H1" and h1_data is not None:
+                # Reutiliser les donnees H1 deja recuperees
+                closes, highs, lows, opens, times, volumes = h1_data
+            else:
+                # Attendre entre les appels pour respecter la limite API
+                if i > 0:
+                    time.sleep(15)
+                closes, highs, lows, opens, times, volumes = get_history(interval, 200)
             ind = compute_indicators(closes, highs, lows, opens, volumes)
             res = build_signal(ind["price"], ind, corr_signal, struct_signal, cot_signal, fred_signal, fg_signal)
             results[label] = {"signal": res["sig"], "conf": res["conf"], "ind": ind, "result": res}
@@ -1347,7 +1353,8 @@ def run_full_analysis():
     structure = ind_h1["structure"]
     struct_sig = "bull" if "HAUSSIERE" in structure else ("bear" if "BAISSIERE" in structure else "neut")
 
-    mtf = multi_timeframe_analysis(corr_signal, struct_sig, cot_signal, fred_signal, fg_signal)
+    h1_data = (closes, highs, lows, opens, times, volumes)
+    mtf = multi_timeframe_analysis(corr_signal, struct_sig, cot_signal, fred_signal, fg_signal, h1_data)
     h1 = mtf.get("H1", {})
     ind = h1.get("ind") or ind_h1
     result = h1.get("result") or {}

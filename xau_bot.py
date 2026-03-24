@@ -215,8 +215,12 @@ def get_correlated_assets():
     if _corr_cache["data"] and (now - _corr_cache["time"]) < 300:
         return _corr_cache["data"]
     results = {}
+    mapping = {
+        "WTI/USD": "WTI", "SPY": "SPX", "TLT": "BONDS",
+        "DX/Y": "DXY", "VIX": "VIX", "XAG/USD": "SILVER"
+    }
     try:
-        # Un seul appel batch pour tous les actifs
+        # Essai 1: appel batch pour tous les actifs
         symbols = "WTI/USD,SPY,TLT,DX/Y,VIX,XAG/USD"
         r = requests.get(
             "https://api.twelvedata.com/quote",
@@ -224,10 +228,6 @@ def get_correlated_assets():
             timeout=10
         )
         d = r.json()
-        mapping = {
-            "WTI/USD": "WTI", "SPY": "SPX", "TLT": "BONDS",
-            "DX/Y": "DXY", "VIX": "VIX", "XAG/USD": "SILVER"
-        }
         if isinstance(d, dict):
             for sym, name in mapping.items():
                 item = d.get(sym, {})
@@ -240,8 +240,32 @@ def get_correlated_assets():
                         }
                     except:
                         pass
+        print("Corr batch: " + str(len(results)) + " actifs recuperes")
     except Exception as e:
         print("Corr batch error: " + str(e))
+
+    # Fallback: appels individuels pour les actifs manquants
+    if len(results) < 3:
+        print("Fallback correlations individuelles...")
+        for sym, name in mapping.items():
+            if name not in results:
+                try:
+                    r = requests.get(
+                        "https://api.twelvedata.com/quote",
+                        params={"symbol": sym, "apikey": TWELVE_KEY},
+                        timeout=6
+                    )
+                    d = r.json()
+                    if d.get("status") != "error" and d.get("close"):
+                        results[name] = {
+                            "price": float(d["close"]),
+                            "change": float(d.get("change", 0)),
+                            "pct": float(d.get("percent_change", 0))
+                        }
+                    time.sleep(8)
+                except:
+                    pass
+
     _corr_cache["data"] = results
     _corr_cache["time"] = now
     return results
@@ -1252,16 +1276,23 @@ def multi_timeframe_analysis(corr_signal="neut", struct_signal="neut", cot_signa
                 if i > 0:
                     time.sleep(20)
                 # Retry logic si rate limit
+                last_err = None
                 for attempt in range(3):
                     try:
                         closes, highs, lows, opens, times, volumes = get_history(interval, 200)
+                        last_err = None
                         break
                     except Exception as retry_err:
-                        if "credits" in str(retry_err).lower() or "limit" in str(retry_err).lower():
-                            print("Rate limit sur " + label + " - attente 30s...")
-                            time.sleep(30)
+                        last_err = retry_err
+                        err_msg = str(retry_err).lower()
+                        if "credits" in err_msg or "limit" in err_msg or "429" in err_msg:
+                            wait_time = 30 * (attempt + 1)
+                            print("Rate limit sur " + label + " tentative " + str(attempt+1) + " - attente " + str(wait_time) + "s...")
+                            time.sleep(wait_time)
                         else:
                             raise retry_err
+                if last_err is not None:
+                    raise last_err
             ind = compute_indicators(closes, highs, lows, opens, volumes)
             res = build_signal(ind["price"], ind, corr_signal, struct_signal, cot_signal, fred_signal, fg_signal)
             results[label] = {"signal": res["sig"], "conf": res["conf"], "ind": ind, "result": res}
@@ -1647,10 +1678,14 @@ def claude_validate_signal(price, result, ind, quote, mtf, events, dxy, news, se
         headers={"Content-Type": "application/json", "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01"},
         json={"model": "claude-sonnet-4-20250514", "max_tokens": 1000,
               "messages": [{"role": "user", "content": prompt}]},
-        timeout=40
+        timeout=60
     )
     d = r.json()
     response = "".join(b.get("text", "") for b in d.get("content", []))
+
+    if not response:
+        print("Claude AI: reponse vide - signal envoye sans validation")
+        return True, "Analyse AI indisponible.", "Signal technique valide sur indicateurs.", "MOYEN", "1% du capital"
 
     validated = "VALIDATION: OUI" in response.upper()
     raison = ""

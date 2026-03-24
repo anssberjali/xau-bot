@@ -180,7 +180,8 @@ def get_quote():
         params={"symbol": SYMBOL, "apikey": TWELVE_KEY}, timeout=10)
     d = r.json()
     if d.get("status") == "error":
-        raise Exception(d.get("message", "API error"))
+        msg = d.get("message", "API error")
+        raise Exception(msg)
     return {
         "price": float(d["close"]), "open": float(d["open"]),
         "high": float(d["high"]), "low": float(d["low"]),
@@ -262,7 +263,12 @@ def get_dxy():
     return None
 
 
+_events_cache = {"data": None, "time": 0}
+
 def get_economic_events():
+    now = time.time()
+    if _events_cache["data"] is not None and (now - _events_cache["time"]) < 1800:
+        return _events_cache["data"]
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         tomorrow = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -283,10 +289,12 @@ def get_economic_events():
                     "country": country, "forecast": ev.get("forecast", "N/A"),
                     "previous": ev.get("previous", "N/A")
                 })
+        _events_cache["data"] = important[:6]
+        _events_cache["time"] = time.time()
         return important[:6]
     except Exception as e:
         print("Calendar error: " + str(e))
-        return []
+        return _events_cache["data"] if _events_cache["data"] else []
 
 
 # ── FRED API — DONNEES MACRO OFFICIELLES ─────────────────────────
@@ -1242,8 +1250,18 @@ def multi_timeframe_analysis(corr_signal="neut", struct_signal="neut", cot_signa
             else:
                 # Attendre entre les appels pour respecter la limite API
                 if i > 0:
-                    time.sleep(15)
-                closes, highs, lows, opens, times, volumes = get_history(interval, 200)
+                    time.sleep(20)
+                # Retry logic si rate limit
+                for attempt in range(3):
+                    try:
+                        closes, highs, lows, opens, times, volumes = get_history(interval, 200)
+                        break
+                    except Exception as retry_err:
+                        if "credits" in str(retry_err).lower() or "limit" in str(retry_err).lower():
+                            print("Rate limit sur " + label + " - attente 30s...")
+                            time.sleep(30)
+                        else:
+                            raise retry_err
             ind = compute_indicators(closes, highs, lows, opens, volumes)
             res = build_signal(ind["price"], ind, corr_signal, struct_signal, cot_signal, fred_signal, fg_signal)
             results[label] = {"signal": res["sig"], "conf": res["conf"], "ind": ind, "result": res}

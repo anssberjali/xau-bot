@@ -17,7 +17,7 @@ SYMBOL = "XAU/USD"
 API_URL = "https://api.telegram.org/bot" + TG_TOKEN
 
 ALERT_THRESHOLD = 78
-SCAN_INTERVAL = 300
+SCAN_INTERVAL = 900  # 15 minutes = 280 credits/jour (limite: 800)
 MIN_ALERT_DELAY = 1800
 TRADE_MONITOR_INTERVAL = 60
 
@@ -1232,25 +1232,31 @@ def build_signal(price, ind, corr_signal="neut", struct_signal="neut", cot_signa
     entry = price
     entry_zone_low = entry_zone_high = price
 
+    # TP INTRADAY: trades fermes dans la meme session (3-6h max)
+    # TP1 = 0.5 ATR (~1h) | TP2 = 1.0 ATR (~2h) | TP3 = 1.5 ATR (~3-4h)
+    # SL  = 0.6 ATR (serre mais raisonnable, R/R ~1.67)
     if sig == "BUY":
-        entry_zone_low = round(price - a * 0.3, 2)
-        entry_zone_high = round(price + a * 0.2, 2)
-        tp1 = round(price + a * 1.5, 2)
-        tp2 = round(price + a * 2.5, 2)
-        tp3 = round(price + a * 4.0, 2)
-        sl = round(price - a * 1.2, 2)
-    if sig == "SELL":
         entry_zone_low = round(price - a * 0.2, 2)
-        entry_zone_high = round(price + a * 0.3, 2)
-        tp1 = round(price - a * 1.5, 2)
-        tp2 = round(price - a * 2.5, 2)
-        tp3 = round(price - a * 4.0, 2)
-        sl = round(price + a * 1.2, 2)
+        entry_zone_high = round(price + a * 0.1, 2)
+        tp1 = round(price + a * 0.5, 2)
+        tp2 = round(price + a * 1.0, 2)
+        tp3 = round(price + a * 1.5, 2)
+        sl = round(price - a * 0.6, 2)
+    if sig == "SELL":
+        entry_zone_low = round(price - a * 0.1, 2)
+        entry_zone_high = round(price + a * 0.2, 2)
+        tp1 = round(price - a * 0.5, 2)
+        tp2 = round(price - a * 1.0, 2)
+        tp3 = round(price - a * 1.5, 2)
+        sl = round(price + a * 0.6, 2)
 
     if tp2 and sl:
         g = abs(tp2 - price)
         r = abs(sl - price)
         rr = round(g / r, 2) if r > 0 else None
+        # R/R minimum 1.5 pour valider le trade
+        if rr and rr < 1.2:
+            sig = "NEUTRE"  # Signal invalide si R/R trop faible
 
     dir_filter = "bull" if sig == "BUY" else "bear"
     reasons = [s["label"] for s in S if s["dir"] == dir_filter][:8]
@@ -1669,7 +1675,9 @@ def claude_validate_signal(price, result, ind, quote, mtf, events, dxy, news, se
         "RISQUE: FAIBLE ou MOYEN ou ELEVE\n\n"
         "LOT_CONSEILLE: (% capital selon risque)\n\n"
         "Criteres OUI: 2/3 TF alignes, COT favorable, macro soutient, structure confirme, ichimoku confirme, session active, R/R>=1.5\n"
-        "Criteres NON: COT contre le signal, macro adverse, news imminente majeure, structure contradictoire, divergence baissiere\n\n"
+        "Criteres NON: COT contre le signal, macro adverse, news imminente majeure, structure contradictoire, divergence baissiere\n"
+        "IMPORTANT: Ce sont des trades INTRADAY - le trade doit pouvoir etre ferme dans la meme session (3-6h max).\n"
+        "Si le contexte suggere un mouvement lent ou range, dis NON.\n\n"
         "En francais, niveau institutionnel, precis."
     )
 
@@ -1862,7 +1870,8 @@ def format_precise_alert(price, quote, result, ind, mtf, events, news, corr, cor
         "Fiabilite: *" + str(conf) + "%* | Risque: *" + risque + "*\n"
         "Session: *" + session["session"] + "*\n"
         "Structure: *" + structure + "*\n"
-        "Validation AI: *OUI - TRADE VALIDE*\n\n"
+        "Validation AI: *OUI - TRADE VALIDE*\n"
+        "Type: *INTRADAY - Fermer avant fin de session*\n\n"
         "---\n"
         "*PLAN DE TRADE*\n\n"
         "Zone entree: `" + str(entry_low) + " - " + str(entry_high) + "`\n"
@@ -2177,7 +2186,7 @@ def handle(update):
 
     elif text_lower == "/alertes":
         subscribers.add(chat_id)
-        send(chat_id, "Alertes ACTIVEES.\nSysteme complet: Macro + COT + Ichimoku + Supertrend + Fib + OB + Patterns + News + Claude AI\nScan toutes les 5 min.")
+        send(chat_id, "Alertes ACTIVEES.\nSysteme complet: Macro + COT + Ichimoku + Supertrend + Fib + OB + Patterns + News + Claude AI\nScan toutes les 15 min.")
 
     elif text_lower == "/stop":
         subscribers.discard(chat_id)
@@ -2635,7 +2644,7 @@ def daily_report_scheduler():
 def main():
     print("XAU/USD Signal Pro v10 - VERSION FINALE")
     print("Niveau institutionnel: Macro FRED + COT CFTC + Fear&Greed + Ichimoku + Supertrend + KAMA + OrderBlocks + Divergences + Liquidite")
-    print("Seuil: " + str(ALERT_THRESHOLD) + "% | Delai: " + str(MIN_ALERT_DELAY//60) + "min")
+    print("Seuil: " + str(ALERT_THRESHOLD) + "% | Delai: " + str(MIN_ALERT_DELAY//60) + "min | Scan: " + str(SCAN_INTERVAL//60) + "min")
 
     threading.Thread(target=auto_scan, daemon=True).start()
     threading.Thread(target=daily_report_scheduler, daemon=True).start()

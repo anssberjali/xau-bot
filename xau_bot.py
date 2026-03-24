@@ -1534,13 +1534,13 @@ def claude_validate_signal(price, result, ind, quote, mtf, events, dxy, news, se
     dxy_str = str(round(dxy, 2)) if dxy else "indisponible"
     news_text = format_news_for_claude(news)
     sent_str = (sentiment + " " + str(sent_score) + "%") if sentiment else "indisponible"
-    corr_str = "\n".join("- " + a for a in corr_analysis) if corr_analysis else "Neutre"
+    corr_str = "\n".join(("- " + a for a in corr_analysis)) if corr_analysis else "Neutre"
 
     patterns = ind.get("patterns", [])
-    patterns_str = "\n".join("- " + p["name"] + ": " + p["desc"] for p in patterns) if patterns else "Aucun"
+    patterns_str = "\n".join(("- " + p["name"] + ": " + p["desc"] for p in patterns)) if patterns else "Aucun"
 
     divergences = ind.get("divergences", [])
-    div_str = "\n".join("- " + d["type"] + ": " + d["desc"] for d in divergences) if divergences else "Aucune"
+    div_str = "\n".join(("- " + d["type"] + ": " + d["desc"] for d in divergences)) if divergences else "Aucune"
 
     ob = ind.get("ob_current")
     ob_str = ("Prix dans " + ob["type"] + " (" + str(ob["low"]) + "-" + str(ob["high"]) + ")") if ob else "Pas d order block actif"
@@ -1559,11 +1559,14 @@ def claude_validate_signal(price, result, ind, quote, mtf, events, dxy, news, se
 
     cot_str = format_cot(cot) if cot else "Donnees COT indisponibles"
     fred_str = format_fred_data(fred) if fred else "Donnees FRED indisponibles"
-    fred_interp_str = "\n".join("- " + i for i in fred_interpretation) if fred_interpretation else "Neutre"
+    fred_interp_str = "\n".join(("- " + i for i in fred_interpretation)) if fred_interpretation else "Neutre"
     fg_str = ("Fear & Greed: " + str(fg["value"]) + " [" + fg["classification"] + "]") if fg else "indisponible"
 
     liquidity = ind.get("liquidity", [])
-    liq_str = ("\n".join("- " + l["type"] + " @ " + str(l["level"]) + " (dist: " + str(l["dist_pct"]) + "%)") for l in liquidity[:3]) if liquidity else "Aucune zone detectee"
+    if liquidity:
+        liq_str = "\n".join("- " + l["type"] + " @ " + str(l["level"]) + " (dist: " + str(l["dist_pct"]) + "%)" for l in liquidity[:3])
+    else:
+        liq_str = "Aucune zone detectee"
 
     prompt = (
         "Tu es un expert trader XAU/USD senior avec 20 ans d experience institutionnelle. Nous sommes le " + today + ".\n\n"
@@ -1666,10 +1669,10 @@ def get_daily_report_ai(price, quote, mtf, events, dxy, ind, news, sentiment, se
     dxy_str = str(round(dxy, 2)) if dxy else "indisponible"
     news_text = format_news_for_claude(news)
     sent_str = (sentiment + " " + str(sent_score) + "%") if sentiment else "indisponible"
-    corr_str = "\n".join("- " + a for a in corr_analysis) if corr_analysis else "Neutre"
+    corr_str = "\n".join(("- " + a for a in corr_analysis)) if corr_analysis else "Neutre"
     cot_str = format_cot(cot) if cot else "Indisponible"
     fred_str = format_fred_data(fred) if fred else "Indisponible"
-    fred_interp = "\n".join("- " + i for i in fred_interpretation) if fred_interpretation else "Neutre"
+    fred_interp = "\n".join(("- " + i for i in fred_interpretation)) if fred_interpretation else "Neutre"
     fg_str = ("Fear & Greed: " + str(fg["value"]) + " [" + fg["classification"] + "]") if fg else "indisponible"
     ichi = ind.get("ichimoku")
     ichi_str = ichi["label"] if ichi else "indisponible"
@@ -1784,7 +1787,7 @@ def format_precise_alert(price, quote, result, ind, mtf, events, news, corr, cor
     patterns_str = "".join(("  ▲ " if p["dir"] == "bull" else "  ▼ ") + p["name"] + "\n" for p in patterns[:3]) or "  Aucun pattern\n"
 
     divergences = ind.get("divergences", [])
-    div_str = "".join("  ◆ " + d["type"] + "\n" for d in divergences) or ""
+    div_str = "".join(("  ◆ " + d["type"] + "\n" for d in divergences)) or ""
 
     ob = ind.get("ob_current")
     ob_line = ("Order Block: " + ob["type"] + " (" + str(ob["low"]) + "-" + str(ob["high"]) + ")\n") if ob else ""
@@ -1868,7 +1871,7 @@ def format_analyse_complete(price, quote, result, ind, mtf, events, news, sentim
     sig_label = "ACHAT" if sig == "BUY" else ("VENTE" if sig == "SELL" else "NEUTRE")
     chg = ("+" if quote["change"] >= 0 else "") + str(round(quote["change"], 2))
     pct = ("+" if quote["pct"] >= 0 else "") + str(round(quote["pct"], 2))
-    reasons_text = "\n".join("  - " + r for r in result.get("reasons", []))
+    reasons_text = "\n".join(("  - " + r for r in result.get("reasons", [])))
     rsi_label = "Surachat" if ind.get("rsi", 50) > 70 else ("Survente" if ind.get("rsi", 50) < 30 else "Neutre")
     confluence_sig, _ = mtf_confluence(mtf)
     aligned = "OUI" if confluence_sig == sig and sig != "NEUTRE" else "NON"
@@ -1902,7 +1905,7 @@ def format_analyse_complete(price, quote, result, ind, mtf, events, news, sentim
     fg_line = ("Fear&Greed: `" + str(fg["value"]) + "` [" + fg["classification"] + "]\n") if fg else ""
 
     divergences = ind.get("divergences", [])
-    div_str = "".join("  ◆ " + d["type"] + "\n" for d in divergences) or "  Aucune\n"
+    div_str = "".join(("  ◆ " + d["type"] + "\n" for d in divergences)) or "  Aucune\n"
 
     ob = ind.get("ob_current")
     ob_line = ("Order Block: " + ob["type"] + "\n") if ob else "  Aucun order block actif\n"

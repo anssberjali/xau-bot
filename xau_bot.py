@@ -6,28 +6,13 @@ import json
 from datetime import datetime, timedelta
 from math import sqrt
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
-
-def supabase_insert(table, data):
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        return False
-    try:
-        requests.post(
-            SUPABASE_URL + "/rest/v1/" + table,
-            headers={"apikey": SUPABASE_KEY,
-                     "Authorization": "Bearer " + SUPABASE_KEY,
-                     "Content-Type": "application/json"},
-            json=data, timeout=8)
-        return True
-    except:
-        return False
-
 TG_TOKEN = os.environ.get("TG_TOKEN", "")
 TWELVE_KEY = os.environ.get("TWELVE_KEY", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_KEY", "")
 FINNHUB_KEY = os.environ.get("FINNHUB_KEY", "")
 FRED_KEY = os.environ.get("FRED_KEY", "")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 SYMBOL = "XAU/USD"
 API_URL = "https://api.telegram.org/bot" + TG_TOKEN
 
@@ -44,9 +29,115 @@ user_capital = {}
 signal_history = []
 cached_cot = {"data": None, "time": 0}
 cached_fear_greed = {"data": None, "time": 0}
-cached_fred = {"data": None, "time": 0}
+
+# ── SUPABASE DATABASE ─────────────────────────────────────────────
+
+def supabase_insert(table, data):
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return False
+    try:
+        requests.post(
+            SUPABASE_URL + "/rest/v1/" + table,
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": "Bearer " + SUPABASE_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal"
+            },
+            json=data,
+            timeout=8
+        )
+        return True
+    except Exception as e:
+        print("Supabase insert error: " + str(e))
+        return False
 
 
+def supabase_select(table, params="select=*&order=created_at.desc&limit=100"):
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return []
+    try:
+        r = requests.get(
+            SUPABASE_URL + "/rest/v1/" + table + "?" + params,
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": "Bearer " + SUPABASE_KEY
+            },
+            timeout=8
+        )
+        return r.json()
+    except Exception as e:
+        print("Supabase select error: " + str(e))
+        return []
+
+
+def db_save_signal(sig, conf, entry, tp1, tp2, tp3, sl, rr, structure, session, validated):
+    return supabase_insert("signals", {
+        "signal": sig,
+        "confidence": conf,
+        "entry_price": round(entry, 2) if entry else None,
+        "tp1": round(tp1, 2) if tp1 else None,
+        "tp2": round(tp2, 2) if tp2 else None,
+        "tp3": round(tp3, 2) if tp3 else None,
+        "sl": round(sl, 2) if sl else None,
+        "rr": rr,
+        "structure": structure,
+        "session": session,
+        "validated": validated,
+        "outcome": "OPEN"
+    })
+
+
+def db_get_performance():
+    data = supabase_select("signals",
+        "select=signal,confidence,outcome,created_at&order=created_at.desc&limit=500")
+    if not data or not isinstance(data, list):
+        return None
+    from datetime import datetime, timedelta
+    week_ago = (datetime.now() - timedelta(days=7)).isoformat()
+    weekly = [s for s in data if s.get("created_at", "") > week_ago]
+    total = len(weekly)
+    wins = sum(1 for s in weekly if s.get("outcome") == "WIN")
+    losses = sum(1 for s in weekly if s.get("outcome") == "LOSS")
+    open_t = sum(1 for s in weekly if s.get("outcome") == "OPEN")
+    win_rate = round((wins / (wins + losses)) * 100, 1) if (wins + losses) > 0 else 0
+    buys = [s for s in weekly if s.get("signal") == "BUY"]
+    sells = [s for s in weekly if s.get("signal") == "SELL"]
+    buy_wins = sum(1 for s in buys if s.get("outcome") == "WIN")
+    sell_wins = sum(1 for s in sells if s.get("outcome") == "WIN")
+    all_total = len(data)
+    all_wins = sum(1 for s in data if s.get("outcome") == "WIN")
+    all_losses = sum(1 for s in data if s.get("outcome") == "LOSS")
+    all_rate = round((all_wins / (all_wins + all_losses)) * 100, 1) if (all_wins + all_losses) > 0 else 0
+    return {
+        "weekly_total": total, "weekly_wins": wins,
+        "weekly_losses": losses, "weekly_open": open_t,
+        "weekly_rate": win_rate,
+        "buy_total": len(buys), "buy_wins": buy_wins,
+        "buy_rate": round((buy_wins / len(buys)) * 100, 1) if buys else 0,
+        "sell_total": len(sells), "sell_wins": sell_wins,
+        "sell_rate": round((sell_wins / len(sells)) * 100, 1) if sells else 0,
+        "all_total": all_total, "all_wins": all_wins,
+        "all_losses": all_losses, "all_rate": all_rate
+    }
+
+
+def format_db_performance():
+    perf = db_get_performance()
+    if not perf:
+        return "Aucune donnee en base. Les signaux seront sauvegardes apres la prochaine alerte."
+    line1 = "*PERFORMANCE REELLE (Base de donnees)*"
+    line2 = "*7 derniers jours:*"
+    line3 = "Signaux: `" + str(perf["weekly_total"]) + "` | Wins: `" + str(perf["weekly_wins"]) + "` | Losses: `" + str(perf["weekly_losses"]) + "`"
+    line4 = "Taux reussite: *" + str(perf["weekly_rate"]) + "%*"
+    line5 = "*Historique complet:*"
+    line6 = "Total: `" + str(perf["all_total"]) + "` signaux"
+    line7 = "Taux global: *" + str(perf["all_rate"]) + "%*"
+    line8 = "*Par direction:*"
+    line9 = "BUY: `" + str(perf["buy_total"]) + "` -> *" + str(perf["buy_rate"]) + "%*"
+    line10 = "SELL: `" + str(perf["sell_total"]) + "` -> *" + str(perf["sell_rate"]) + "%*"
+    nl = chr(10)
+    return (line1 + nl + nl + line2 + nl + line3 + nl + line4 + nl + nl + line5 + nl + line6 + nl + line7 + nl + nl + line8 + nl + line9 + nl + line10)
 def send(chat_id, text):
     try:
         requests.post(API_URL + "/sendMessage", json={
@@ -115,27 +206,51 @@ def get_history(interval="1h", bars=200):
     )
 
 
+# Cache pour les correlations (valide 5 minutes)
+_corr_cache = {"data": None, "time": 0}
+
 def get_correlated_assets():
-    assets = {"WTI": "WTI/USD", "SPX": "SPY", "BONDS": "TLT",
-              "DXY": "DX/Y", "VIX": "VIX", "SILVER": "XAG/USD"}
+    now = time.time()
+    if _corr_cache["data"] and (now - _corr_cache["time"]) < 300:
+        return _corr_cache["data"]
     results = {}
-    for name, sym in assets.items():
-        try:
-            r = requests.get("https://api.twelvedata.com/quote",
-                params={"symbol": sym, "apikey": TWELVE_KEY}, timeout=8)
-            d = r.json()
-            if d.get("status") != "error" and d.get("close"):
-                results[name] = {
-                    "price": float(d["close"]),
-                    "change": float(d.get("change", 0)),
-                    "pct": float(d.get("percent_change", 0))
-                }
-        except:
-            pass
+    try:
+        # Un seul appel batch pour tous les actifs
+        symbols = "WTI/USD,SPY,TLT,DX/Y,VIX,XAG/USD"
+        r = requests.get(
+            "https://api.twelvedata.com/quote",
+            params={"symbol": symbols, "apikey": TWELVE_KEY},
+            timeout=10
+        )
+        d = r.json()
+        mapping = {
+            "WTI/USD": "WTI", "SPY": "SPX", "TLT": "BONDS",
+            "DX/Y": "DXY", "VIX": "VIX", "XAG/USD": "SILVER"
+        }
+        if isinstance(d, dict):
+            for sym, name in mapping.items():
+                item = d.get(sym, {})
+                if item and item.get("status") != "error" and item.get("close"):
+                    try:
+                        results[name] = {
+                            "price": float(item["close"]),
+                            "change": float(item.get("change", 0)),
+                            "pct": float(item.get("percent_change", 0))
+                        }
+                    except:
+                        pass
+    except Exception as e:
+        print("Corr batch error: " + str(e))
+    _corr_cache["data"] = results
+    _corr_cache["time"] = now
     return results
 
 
 def get_dxy():
+    # Reutilise le cache des correlations si disponible
+    corr = _corr_cache.get("data") or {}
+    if "DXY" in corr:
+        return corr["DXY"]["price"]
     try:
         r = requests.get("https://api.twelvedata.com/quote",
             params={"symbol": "DX/Y", "apikey": TWELVE_KEY}, timeout=8)
@@ -1118,8 +1233,10 @@ def build_signal(price, ind, corr_signal="neut", struct_signal="neut", cot_signa
 
 def multi_timeframe_analysis(corr_signal="neut", struct_signal="neut", cot_signal="neut", fred_signal="neut", fg_signal="neut"):
     results = {}
-    for interval, label in [("1h", "H1"), ("4h", "H4"), ("1day", "D1")]:
+    for i, (interval, label) in enumerate([("1h", "H1"), ("4h", "H4"), ("1day", "D1")]):
         try:
+            if i > 0:
+                time.sleep(12)  # 12s entre appels = max 5 appels/minute
             closes, highs, lows, opens, times, volumes = get_history(interval, 200)
             ind = compute_indicators(closes, highs, lows, opens, volumes)
             res = build_signal(ind["price"], ind, corr_signal, struct_signal, cot_signal, fred_signal, fg_signal)
@@ -1143,9 +1260,26 @@ def mtf_confluence(mtf):
 
 
 def run_full_analysis():
-    quote = get_quote()
-    price = quote["price"]
+    # OPTIMISE: H1 history d abord pour extraire le prix sans appel supplementaire
+    closes, highs, lows, opens, times, volumes = get_history("1h", 200)
 
+    # Extraire prix actuel depuis H1 (evite un appel get_quote separe)
+    try:
+        q_raw = requests.get("https://api.twelvedata.com/quote",
+            params={"symbol": SYMBOL, "apikey": TWELVE_KEY}, timeout=10)
+        q_data = q_raw.json()
+        price = float(q_data["close"])
+        quote = {
+            "price": price, "open": float(q_data["open"]),
+            "high": float(q_data["high"]), "low": float(q_data["low"]),
+            "change": float(q_data["change"]), "pct": float(q_data["percent_change"])
+        }
+    except:
+        price = closes[-1]
+        quote = {"price": price, "open": opens[-1], "high": highs[-1],
+                "low": lows[-1], "change": 0, "pct": 0}
+
+    # Un seul appel batch pour toutes les correlations (inclut DXY)
     corr = get_correlated_assets()
     corr_signal, corr_analysis = analyze_correlations(corr)
 
@@ -1158,7 +1292,6 @@ def run_full_analysis():
     fg = get_fear_greed()
     fg_signal = fg["signal"] if fg else "neut"
 
-    closes, highs, lows, opens, times, volumes = get_history("1h", 200)
     ind_h1 = compute_indicators(closes, highs, lows, opens, volumes)
     structure = ind_h1["structure"]
     struct_sig = "bull" if "HAUSSIERE" in structure else ("bear" if "BAISSIERE" in structure else "neut")
@@ -1946,7 +2079,13 @@ def handle(update):
             send(chat_id, "Aucun trade actif.")
 
     elif text_lower == "/performance":
-        send(chat_id, format_weekly_performance())
+        typing(chat_id)
+        db_perf = format_db_performance()
+        local_perf = format_weekly_performance()
+        if "Aucune donnee" not in db_perf:
+            send(chat_id, db_perf)
+        else:
+            send(chat_id, local_perf)
 
     elif text_lower.startswith("/capital"):
         parts = text.split()
@@ -2319,20 +2458,12 @@ def auto_scan():
                         if validated:
                             print("ALERTE VALIDEE: " + sig + " " + str(conf) + "%")
                             record_signal(sig, conf, result["entry"], result["tp2"], result["sl"])
-                            supabase_insert("signals", {
-    "signal": sig,
-    "confidence": conf,
-    "entry_price": result["entry"],
-    "tp1": result["tp1"],
-    "tp2": result["tp2"],
-    "tp3": result["tp3"],
-    "sl": result["sl"],
-    "rr": result["rr"],
-    "structure": structure,
-    "session": session["session"],
-    "validated": True,
-    "outcome": "OPEN"
-})
+                            db_save_signal(
+                                sig, conf, result["entry"],
+                                result["tp1"], result["tp2"], result["tp3"],
+                                result["sl"], result["rr"],
+                                structure, session["session"], True
+                            )
                             for chat_id in list(subscribers):
                                 message = format_precise_alert(
                                     price, quote, result, ind, mtf, events, news,
@@ -2376,7 +2507,9 @@ def daily_report_scheduler():
 
             if now.weekday() == 0 and now.hour == 8 and now.minute < 5 and last_weekly_report != now.date():
                 if subscribers:
-                    perf = format_weekly_performance()
+                    db_perf = format_db_performance()
+                    local_perf = format_weekly_performance()
+                    perf = db_perf if "Aucune donnee" not in db_perf else local_perf
                     for chat_id in list(subscribers):
                         send(chat_id, perf)
                     last_weekly_report = now.date()

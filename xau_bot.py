@@ -1260,10 +1260,51 @@ def mtf_confluence(mtf):
 
 
 def run_full_analysis():
-    # OPTIMISE: H1 history d abord pour extraire le prix sans appel supplementaire
+    # OPTIMISE: APIs lentes en parallele, APIs rapides en serie
+    import concurrent.futures
+
+    # Resultats des APIs lentes
+    slow_results = {"cot": None, "fred": {}, "fg": None, "news": [], "sentiment": (None, None)}
+
+    def fetch_cot():
+        try:
+            slow_results["cot"] = get_cot_report()
+        except:
+            pass
+
+    def fetch_fred():
+        try:
+            slow_results["fred"] = get_fred_data()
+        except:
+            pass
+
+    def fetch_fg():
+        try:
+            slow_results["fg"] = get_fear_greed()
+        except:
+            pass
+
+    def fetch_news():
+        try:
+            slow_results["news"] = get_real_news()
+            slow_results["sentiment"] = get_forex_sentiment()
+        except:
+            pass
+
+    # Lancer les APIs lentes en parallele
+    threads = [
+        threading.Thread(target=fetch_cot),
+        threading.Thread(target=fetch_fred),
+        threading.Thread(target=fetch_fg),
+        threading.Thread(target=fetch_news),
+    ]
+    for t in threads:
+        t.daemon = True
+        t.start()
+
+    # Pendant ce temps, faire les appels rapides Twelve Data
     closes, highs, lows, opens, times, volumes = get_history("1h", 200)
 
-    # Extraire prix actuel depuis H1 (evite un appel get_quote separe)
     try:
         q_raw = requests.get("https://api.twelvedata.com/quote",
             params={"symbol": SYMBOL, "apikey": TWELVE_KEY}, timeout=10)
@@ -1279,20 +1320,30 @@ def run_full_analysis():
         quote = {"price": price, "open": opens[-1], "high": highs[-1],
                 "low": lows[-1], "change": 0, "pct": 0}
 
-    # Un seul appel batch pour toutes les correlations (inclut DXY)
     corr = get_correlated_assets()
     corr_signal, corr_analysis = analyze_correlations(corr)
 
-    cot = get_cot_report()
+    ind_h1 = compute_indicators(closes, highs, lows, opens, volumes)
+
+    # Attendre les APIs lentes max 8 secondes
+    for t in threads:
+        t.join(timeout=8)
+
+    # Recuperer les resultats
+    cot = slow_results["cot"]
+    fred = slow_results["fred"]
+    fg = slow_results["fg"]
+    news = slow_results["news"]
+    sentiment, sent_score = slow_results["sentiment"]
+
     cot_signal = cot["signal"] if cot else "neut"
-
-    fred = get_fred_data()
-    fred_signal, fred_interpretation = interpret_fred_for_gold(fred)
-
-    fg = get_fear_greed()
+    fred_signal, fred_interpretation = interpret_fred_for_gold(fred) if fred else ("neut", [])
     fg_signal = fg["signal"] if fg else "neut"
 
-    ind_h1 = compute_indicators(closes, highs, lows, opens, volumes)
+    print("APIs: COT=" + ("OK" if cot else "N/A") +
+          " FRED=" + ("OK" if fred else "N/A") +
+          " FG=" + ("OK" if fg else "N/A") +
+          " News=" + str(len(news)))
     structure = ind_h1["structure"]
     struct_sig = "bull" if "HAUSSIERE" in structure else ("bear" if "BAISSIERE" in structure else "neut")
 
@@ -1307,8 +1358,6 @@ def run_full_analysis():
 
     events = get_economic_events()
     dxy = get_dxy()
-    news = get_real_news()
-    sentiment, sent_score = get_forex_sentiment()
     session = get_session_info()
 
     return (price, quote, result, ind, mtf, events, dxy, news, sentiment, sent_score,

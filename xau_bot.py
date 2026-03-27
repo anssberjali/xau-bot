@@ -71,6 +71,87 @@ def supabase_select(table, params="select=*&order=created_at.desc&limit=100"):
         return []
 
 
+def supabase_update(table, match_col, match_val, data):
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return False
+    try:
+        r = requests.patch(
+            SUPABASE_URL + "/rest/v1/" + table + "?" + match_col + "=eq." + str(match_val),
+            headers={
+                "apikey": SUPABASE_KEY,
+                "Authorization": "Bearer " + SUPABASE_KEY,
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal"
+            },
+            json=data,
+            timeout=8
+        )
+        return r.status_code in [200, 204]
+    except Exception as e:
+        print("Supabase update error: " + str(e))
+        return False
+
+
+def update_open_outcomes():
+    # Recupere les signaux OPEN et verifie si TP2 ou SL a ete touche
+    try:
+        data = supabase_select("signals",
+            "select=id,signal,entry_price,tp2,sl,created_at&outcome=eq.OPEN&order=created_at.desc&limit=20")
+        if not data or not isinstance(data, list):
+            return
+
+        try:
+            r = requests.get("https://api.twelvedata.com/quote",
+                params={"symbol": SYMBOL, "apikey": TWELVE_KEY}, timeout=8)
+            current_price = float(r.json().get("close", 0))
+            if not current_price:
+                return
+        except:
+            return
+
+        for signal in data:
+            sig = signal.get("signal")
+            entry = signal.get("entry_price")
+            tp2 = signal.get("tp2")
+            sl = signal.get("sl")
+            sid = signal.get("id")
+            created = signal.get("created_at", "")
+
+            if not entry or not tp2 or not sl or not sid:
+                continue
+
+            # Ferme automatiquement les signaux de plus de 6h (intraday)
+            try:
+                signal_age_hours = (datetime.now() - datetime.fromisoformat(created.replace("Z", ""))).total_seconds() / 3600
+            except:
+                signal_age_hours = 0
+
+            outcome = None
+
+            if sig == "BUY":
+                if current_price >= tp2:
+                    outcome = "WIN"
+                elif current_price <= sl:
+                    outcome = "LOSS"
+                elif signal_age_hours > 6:
+                    outcome = "WIN" if current_price > entry else "LOSS"
+            elif sig == "SELL":
+                if current_price <= tp2:
+                    outcome = "WIN"
+                elif current_price >= sl:
+                    outcome = "LOSS"
+                elif signal_age_hours > 6:
+                    outcome = "WIN" if current_price < entry else "LOSS"
+
+            if outcome:
+                supabase_update("signals", "id", sid, {"outcome": outcome})
+                print("Signal " + str(sid) + " mis a jour: " + outcome +
+                      " (prix: " + str(current_price) + " entree: " + str(entry) + ")")
+
+    except Exception as e:
+        print("Outcome updater error: " + str(e))
+
+
 def db_save_signal(sig, conf, entry, tp1, tp2, tp3, sl, rr, structure, session, validated):
     return supabase_insert("signals", {
         "signal": sig,
@@ -2551,6 +2632,9 @@ def auto_scan():
     print("Scan automatique v10 lance...")
     while True:
         try:
+            # Mettre a jour les outcomes des signaux OPEN a chaque scan
+            update_open_outcomes()
+
             if subscribers:
                 print("Scan... " + str(len(subscribers)) + " abonnes")
                 (price, quote, result, ind, mtf, events, dxy, news, sentiment, sent_score,
